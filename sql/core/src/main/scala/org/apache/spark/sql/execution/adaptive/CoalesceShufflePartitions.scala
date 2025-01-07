@@ -104,6 +104,7 @@ case class CoalesceShufflePartitions(session: SparkSession) extends AQEShuffleRe
         conf.getConf(SQLConf.COALESCE_PARTITIONS_MIN_PARTITION_SIZE)
       }
 
+      // First try size-based coalescing
       val newPartitionSpecs = ShufflePartitionsUtil.coalescePartitions(
         coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats),
         coalesceGroup.shuffleStages.map(_.partitionSpecs),
@@ -111,8 +112,25 @@ case class CoalesceShufflePartitions(session: SparkSession) extends AQEShuffleRe
         minNumPartitions = minNumPartitions,
         minPartitionSize = minPartitionSize)
 
-      if (newPartitionSpecs.nonEmpty) {
-        coalesceGroup.shuffleStages.zip(newPartitionSpecs).map { case (stageInfo, partSpecs) =>
+      // If size-based coalescing didn't produce any results, try row-based coalescing
+      val finalPartitionSpecs = if (newPartitionSpecs.isEmpty) {
+        val avgRowSize = ShufflePartitionsUtil.estimateAverageRowSize(
+          coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats))
+        val targetRows = (advisoryTargetSize / avgRowSize).max(1L)
+        val minPartitionRows = (minPartitionSize / avgRowSize).max(1L)
+        
+        ShufflePartitionsUtil.coalescePartitionsByRows(
+          coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats),
+          coalesceGroup.shuffleStages.map(_.partitionSpecs),
+          targetRows,
+          minNumPartitions,
+          minPartitionRows)
+      } else {
+        newPartitionSpecs
+      }
+
+      if (finalPartitionSpecs.nonEmpty) {
+        coalesceGroup.shuffleStages.zip(finalPartitionSpecs).map { case (stageInfo, partSpecs) =>
           specsMap.put(stageInfo.shuffleStage.id, partSpecs)
         }
       }

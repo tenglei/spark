@@ -226,6 +226,158 @@ object ShufflePartitionsUtil extends Logging {
    *          CoalescedPartitionSpec(0, 2), CoalescedPartitionSpec(2, 3) and
    *          CoalescedPartitionSpec(3, 5).
    */
+  private def coalescePartitionsByRows(
+      start: Int,
+      end: Int,
+      mapOutputStatistics: Seq[MapOutputStatistics],
+      targetRows: Long,
+      minPartitionRows: Long,
+      allowReturnEmpty: Boolean = false): Seq[CoalescedPartitionSpec] = {
+    val partitionSpecs = ArrayBuffer.empty[CoalescedPartitionSpec]
+    var coalescedRows = 0L
+    var i = start
+    var latestSplitPoint = i
+    var latestPartitionRows = 0L
+
+    def createPartitionSpec(forceCreate: Boolean = false): Unit = {
+      if (coalescedRows > 0 || forceCreate) {
+        partitionSpecs += CoalescedPartitionSpec(latestSplitPoint, i)
+      }
+    }
+
+    while (i < end) {
+      // Calculate total rows of i-th shuffle partitions from all shuffles
+      var totalRowsOfCurrentPartition = 0L
+      var j = 0
+      while (j < mapOutputStatistics.length) {
+        totalRowsOfCurrentPartition += mapOutputStatistics(j).recordsByPartitionId(i)
+        j += 1
+      }
+
+      // Handle skewed partitions
+      if (totalRowsOfCurrentPartition > targetRows * 2) {
+        // Split skewed partition into multiple parts
+        if (coalescedRows > 0) {
+          createPartitionSpec()
+          latestSplitPoint = i
+          latestPartitionRows = coalescedRows
+          coalescedRows = 0
+        }
+        val numSplits = math.ceil(totalRowsOfCurrentPartition / targetRows).toInt
+        for (split <- 0 until numSplits) {
+          partitionSpecs += CoalescedPartitionSpec(i, i + 1)
+        }
+        latestSplitPoint = i + 1
+        latestPartitionRows = 0
+      } else if (i > latestSplitPoint && coalescedRows + totalRowsOfCurrentPartition > targetRows) {
+        if (coalescedRows < minPartitionRows) {
+          // Force merge small partitions
+          if (latestPartitionRows > 0 && latestPartitionRows < totalRowsOfCurrentPartition) {
+            partitionSpecs(partitionSpecs.length - 1) =
+              CoalescedPartitionSpec(partitionSpecs.last.startReducerIndex, i)
+            latestSplitPoint = i
+            latestPartitionRows += coalescedRows
+            coalescedRows = totalRowsOfCurrentPartition
+          } else {
+            coalescedRows += totalRowsOfCurrentPartition
+          }
+        } else {
+          createPartitionSpec()
+          latestSplitPoint = i
+          latestPartitionRows = coalescedRows
+          coalescedRows = totalRowsOfCurrentPartition
+        }
+      } else {
+        coalescedRows += totalRowsOfCurrentPartition
+      }
+      i += 1
+    }
+
+    if (coalescedRows < minPartitionRows && latestPartitionRows > 0) {
+      partitionSpecs(partitionSpecs.length - 1) =
+        CoalescedPartitionSpec(partitionSpecs.last.startReducerIndex, end)
+    } else {
+      createPartitionSpec(!allowReturnEmpty && partitionSpecs.isEmpty)
+    }
+    partitionSpecs.toSeq
+  }
+
+  private def coalescePartitionsByRows(
+      start: Int,
+      end: Int,
+      mapOutputStatistics: Seq[MapOutputStatistics],
+      targetRows: Long,
+      minPartitionRows: Long,
+      allowReturnEmpty: Boolean = false): Seq[CoalescedPartitionSpec] = {
+    val partitionSpecs = ArrayBuffer.empty[CoalescedPartitionSpec]
+    var coalescedRows = 0L
+    var i = start
+    var latestSplitPoint = i
+    var latestPartitionRows = 0L
+
+    def createPartitionSpec(forceCreate: Boolean = false): Unit = {
+      if (coalescedRows > 0 || forceCreate) {
+        partitionSpecs += CoalescedPartitionSpec(latestSplitPoint, i)
+      }
+    }
+
+    while (i < end) {
+      // Calculate total rows of i-th shuffle partitions from all shuffles
+      var totalRowsOfCurrentPartition = 0L
+      var j = 0
+      while (j < mapOutputStatistics.length) {
+        totalRowsOfCurrentPartition += mapOutputStatistics(j).recordsByPartitionId(i)
+        j += 1
+      }
+
+      // Handle skewed partitions
+      if (totalRowsOfCurrentPartition > targetRows * 2) {
+        // Split skewed partition into multiple parts
+        if (coalescedRows > 0) {
+          createPartitionSpec()
+          latestSplitPoint = i
+          latestPartitionRows = coalescedRows
+          coalescedRows = 0
+        }
+        val numSplits = math.ceil(totalRowsOfCurrentPartition / targetRows).toInt
+        for (split <- 0 until numSplits) {
+          partitionSpecs += CoalescedPartitionSpec(i, i + 1)
+        }
+        latestSplitPoint = i + 1
+        latestPartitionRows = 0
+      } else if (i > latestSplitPoint && coalescedRows + totalRowsOfCurrentPartition > targetRows) {
+        if (coalescedRows < minPartitionRows) {
+          // Force merge small partitions
+          if (latestPartitionRows > 0 && latestPartitionRows < totalRowsOfCurrentPartition) {
+            partitionSpecs(partitionSpecs.length - 1) =
+              CoalescedPartitionSpec(partitionSpecs.last.startReducerIndex, i)
+            latestSplitPoint = i
+            latestPartitionRows += coalescedRows
+            coalescedRows = totalRowsOfCurrentPartition
+          } else {
+            coalescedRows += totalRowsOfCurrentPartition
+          }
+        } else {
+          createPartitionSpec()
+          latestSplitPoint = i
+          latestPartitionRows = coalescedRows
+          coalescedRows = totalRowsOfCurrentPartition
+        }
+      } else {
+        coalescedRows += totalRowsOfCurrentPartition
+      }
+      i += 1
+    }
+
+    if (coalescedRows < minPartitionRows && latestPartitionRows > 0) {
+      partitionSpecs(partitionSpecs.length - 1) =
+        CoalescedPartitionSpec(partitionSpecs.last.startReducerIndex, end)
+    } else {
+      createPartitionSpec(!allowReturnEmpty && partitionSpecs.isEmpty)
+    }
+    partitionSpecs.toSeq
+  }
+
   private def coalescePartitions(
       start: Int,
       end: Int,
