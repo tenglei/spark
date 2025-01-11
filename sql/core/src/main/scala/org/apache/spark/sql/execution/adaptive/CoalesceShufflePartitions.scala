@@ -105,23 +105,25 @@ case class CoalesceShufflePartitions(session: SparkSession) extends AQEShuffleRe
       }
 
       // First try size-based coalescing
-      val newPartitionSpecs = ShufflePartitionsUtil.coalescePartitions(
-        coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats),
-        coalesceGroup.shuffleStages.map(_.partitionSpecs),
-        advisoryTargetSize = advisoryTargetSize,
-        minNumPartitions = minNumPartitions,
-        minPartitionSize = minPartitionSize)
+      val mapOutputStats = coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats)
+      val partitionSpecs = coalesceGroup.shuffleStages.map(_.partitionSpecs)
+      
+      val avgRowSize = ShufflePartitionsUtil.estimateAverageRowSize(mapOutputStats)
+      val targetRows = (advisoryTargetSize / avgRowSize).max(1L)
+      val minPartitionRows = (minPartitionSize / avgRowSize).max(1L)
+      
+      val newPartitionSpecs = ShufflePartitionsUtil.coalescePartitionsByRows(
+        mapOutputStats,
+        partitionSpecs,
+        targetRows,
+        minNumPartitions,
+        minPartitionRows)
 
       // If size-based coalescing didn't produce any results, try row-based coalescing
       val finalPartitionSpecs = if (newPartitionSpecs.isEmpty) {
-        val avgRowSize = ShufflePartitionsUtil.estimateAverageRowSize(
-          coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats))
-        val targetRows = (advisoryTargetSize / avgRowSize).max(1L)
-        val minPartitionRows = (minPartitionSize / avgRowSize).max(1L)
-        
         ShufflePartitionsUtil.coalescePartitionsByRows(
-          coalesceGroup.shuffleStages.map(_.shuffleStage.mapStats),
-          coalesceGroup.shuffleStages.map(_.partitionSpecs),
+          mapOutputStats,
+          partitionSpecs,
           targetRows,
           minNumPartitions,
           minPartitionRows)

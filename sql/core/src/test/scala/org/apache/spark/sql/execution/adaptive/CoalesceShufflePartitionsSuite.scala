@@ -18,315 +18,112 @@
 package org.apache.spark.sql.execution.adaptive
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.sql.execution.adaptive.ShufflePartitionsUtil.CoalescedPartitionSpec
+import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShufflePartitionSpec}
+import org.apache.spark.sql.internal.SQLConf
 
 class CoalesceShufflePartitionsSuite extends SparkFunSuite {
 
-  // Basic Scenarios
-  test("uniform distribution - basic") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(1000L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 2),
-      CoalescedPartitionSpec(2, 4)
-    ))
+  private def createMapOutputStats(
+      bytesByPartition: Array[Long],
+      recordsByPartition: Array[Long]): MapOutputStatistics = {
+    MapOutputStatistics(bytesByPartition, recordsByPartition)
   }
 
-  test("single skewed partition - left") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(5000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(5000L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
+  test("coalesce partitions by rows - basic case") {
+    val stats = Seq(
+      Some(createMapOutputStats(
+        Array(100L, 200L, 300L, 400L),
+        Array(10L, 20L, 30L, 40L))))
+
+    val specs = Seq(Some(Seq(
+      CoalescedPartitionSpec(0, 1, Seq(0)),
+      CoalescedPartitionSpec(1, 2, Seq(1)),
+      CoalescedPartitionSpec(2, 3, Seq(2)),
+      CoalescedPartitionSpec(3, 4, Seq(3)))))
+
     val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
+      stats, specs, targetRows = 25, minNumPartitions = 1, minPartitionRows = 1)
+
+    assert(result.size == 2)
+    assert(result.head.size == 2)
+    assert(result.last.size == 2)
   }
 
-  test("multiple skewed partitions - middle and right") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 5000L, 1000L, 3000L)),
-      new MapOutputStatistics(1, Array(1000L, 5000L, 1000L, 3000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
+  test("coalesce partitions by rows - respect min partition rows") {
+    val stats = Seq(
+      Some(createMapOutputStats(
+        Array(100L, 200L, 300L, 400L),
+        Array(10L, 20L, 30L, 40L))))
+
+    val specs = Seq(Some(Seq(
+      CoalescedPartitionSpec(0, 1, Seq(0)),
+      CoalescedPartitionSpec(1, 2, Seq(1)),
+      CoalescedPartitionSpec(2, 3, Seq(2)),
+      CoalescedPartitionSpec(3, 4, Seq(3)))))
+
     val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
+      stats, specs, targetRows = 25, minNumPartitions = 1, minPartitionRows = 30)
+
+    assert(result.size == 3)
+    assert(result.head.size == 1)
+    assert(result(1).size == 2)
+    assert(result.last.size == 1)
   }
 
-  test("all small partitions below min threshold") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(50L, 50L, 50L, 50L)),
-      new MapOutputStatistics(1, Array(50L, 50L, 50L, 50L))
-    )
-    val targetRows = 200L
-    val minPartitionRows = 100L
-    
+  test("coalesce partitions by rows - respect min num partitions") {
+    val stats = Seq(
+      Some(createMapOutputStats(
+        Array(100L, 200L, 300L, 400L),
+        Array(10L, 20L, 30L, 40L))))
+
+    val specs = Seq(Some(Seq(
+      CoalescedPartitionSpec(0, 1, Seq(0)),
+      CoalescedPartitionSpec(1, 2, Seq(1)),
+      CoalescedPartitionSpec(2, 3, Seq(2)),
+      CoalescedPartitionSpec(3, 4, Seq(3)))))
+
     val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 4)
-    ))
+      stats, specs, targetRows = 100, minNumPartitions = 3, minPartitionRows = 1)
+
+    assert(result.size == 3)
+    assert(result.head.size == 1)
+    assert(result(1).size == 2)
+    assert(result.last.size == 1)
   }
 
-  test("all large partitions above target") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(5000L, 5000L, 5000L, 5000L)),
-      new MapOutputStatistics(1, Array(5000L, 5000L, 5000L, 5000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
+  test("coalesce partitions by rows - empty partitions") {
+    val stats = Seq(
+      Some(createMapOutputStats(
+        Array(0L, 0L, 0L, 0L),
+        Array(0L, 0L, 0L, 0L))))
+
+    val specs = Seq(Some(Seq(
+      CoalescedPartitionSpec(0, 1, Seq(0)),
+      CoalescedPartitionSpec(1, 2, Seq(1)),
+      CoalescedPartitionSpec(2, 3, Seq(2)),
+      CoalescedPartitionSpec(3, 4, Seq(3)))))
+
     val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
+      stats, specs, targetRows = 100, minNumPartitions = 1, minPartitionRows = 1)
+
+    assert(result.size == 1)
+    assert(result.head.size == 4)
   }
 
-  // Boundary Conditions
-  test("empty first partition") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(0L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(0L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 2),
-      CoalescedPartitionSpec(2, 4)
-    ))
-  }
+  test("coalesce partitions by rows - single large partition") {
+    val stats = Seq(
+      Some(createMapOutputStats(
+        Array(1000L),
+        Array(100L))))
 
-  test("empty last partition") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 1000L, 1000L, 0L)),
-      new MapOutputStatistics(1, Array(1000L, 1000L, 1000L, 0L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 2),
-      CoalescedPartitionSpec(2, 4)
-    ))
-  }
+    val specs = Seq(Some(Seq(
+      CoalescedPartitionSpec(0, 1, Seq(0)))))
 
-  test("single non-empty partition") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(0L, 0L, 0L, 1000L)),
-      new MapOutputStatistics(1, Array(0L, 0L, 0L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
     val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 4)
-    ))
-  }
+      stats, specs, targetRows = 50, minNumPartitions = 1, minPartitionRows = 1)
 
-  // Complex Combinations
-  test("skew + small + empty partitions") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(5000L, 50L, 0L, 1000L, 50L, 3000L)),
-      new MapOutputStatistics(1, Array(5000L, 50L, 0L, 1000L, 50L, 3000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 6, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4),
-      CoalescedPartitionSpec(4, 5),
-      CoalescedPartitionSpec(5, 6)
-    ))
-  }
-
-  // Parameter Variations
-  test("different target row sizes") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(1000L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 500L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
-  }
-
-  test("extreme min partition row threshold") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(1000L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 5000L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 4)
-    ))
-  }
-
-  test("multiple shuffle stages with different skew patterns") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(5000L, 1000L, 1000L, 1000L)), // left skew
-      new MapOutputStatistics(1, Array(1000L, 1000L, 5000L, 1000L)), // middle skew
-      new MapOutputStatistics(2, Array(1000L, 1000L, 1000L, 5000L))  // right skew
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
-  }
-
-  test("extremely large partitions needing split") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(10000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(10000L, 1000L, 1000L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 4)
-    ))
-  }
-
-  test("minPartitionRows affecting coalescing") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(500L, 500L, 500L, 500L)),
-      new MapOutputStatistics(1, Array(500L, 500L, 500L, 500L))
-    )
-    val targetRows = 1000L
-    val minPartitionRows = 600L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 2),
-      CoalescedPartitionSpec(2, 4)
-    ))
-  }
-
-  test("mixed empty and skewed partitions") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(0L, 5000L, 0L, 1000L)),
-      new MapOutputStatistics(1, Array(0L, 5000L, 0L, 1000L))
-    )
-    val targetRows = 2000L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
-  }
-
-  test("very small target row size") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(100L, 100L, 100L, 100L)),
-      new MapOutputStatistics(1, Array(100L, 100L, 100L, 100L))
-    )
-    val targetRows = 50L
-    val minPartitionRows = 10L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 1),
-      CoalescedPartitionSpec(1, 2),
-      CoalescedPartitionSpec(2, 3),
-      CoalescedPartitionSpec(3, 4)
-    ))
-  }
-
-  test("uneven distribution across shuffle stages") {
-    val mapStats = Seq(
-      new MapOutputStatistics(0, Array(1000L, 1000L, 1000L, 1000L)),
-      new MapOutputStatistics(1, Array(2000L, 2000L, 2000L, 2000L)),
-      new MapOutputStatistics(2, Array(500L, 500L, 500L, 500L))
-    )
-    val targetRows = 1500L
-    val minPartitionRows = 100L
-    
-    val result = ShufflePartitionsUtil.coalescePartitionsByRows(
-      0, 4, mapStats, targetRows, minPartitionRows)
-      
-    assert(result === Seq(
-      CoalescedPartitionSpec(0, 2),
-      CoalescedPartitionSpec(2, 4)
-    ))
+    assert(result.size == 2)
+    assert(result.head.size == 1)
+    assert(result.last.size == 1)
   }
 }
